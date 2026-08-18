@@ -1,0 +1,18 @@
+---
+source: crates/facet_generate/src/reflection/tests.rs
+expression: registry
+---
+? namespace: ROOT
+  name: UserId
+: NEWTYPESTRUCT:
+    - STR
+    - - "Domain ID with `Facet`. Wire anchor for typegen."
+? namespace: ROOT
+  name: WithFacet
+: STRUCT:
+    - - user_id:
+          - TYPENAME:
+              namespace: ROOT
+              name: UserId
+          - []
+    - []

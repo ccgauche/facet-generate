@@ -1,0 +1,26 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: "reflect!(WithVec, UserId, UserIdList).unwrap()"
+---
+? namespace: ROOT
+  name: UserId
+: NEWTYPESTRUCT:
+    - STR
+    - - "Domain ID with `Facet`. Wire anchor for typegen."
+? namespace: ROOT
+  name: UserIdList
+: NEWTYPESTRUCT:
+    - SEQ:
+        TYPENAME:
+          namespace: ROOT
+          name: UserId
+    - - Proxy for list opaque lattice IDs.
+? namespace: ROOT
+  name: WithVec
+: STRUCT:
+    - - user_ids:
+          - TYPENAME:
+              namespace: ROOT
+              name: UserIdList
+          - []
+    - []

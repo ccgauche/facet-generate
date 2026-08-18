@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [unreleased]
 
+### 🚀 Features
+
+- **feat(reflection): emit proxy types for `#[facet(opaque, proxy = T)]` fields**. Opaque
+  fields with a proxy type are now included in generated client bindings. Clients see the
+  proxy type (e.g. `UserId`). Opaque fields without `proxy` are still omitted.
+- **feat(reflection): fix reflection for tuple-based structs**. Newtype and multi-field
+  tuple structs with opaque proxy fields are now reflected correctly in generated bindings.
+  Container fields (`Option`, `Vec`, `HashMap`, …) peel through transparent wrappers to an
+  opaque proxy the same way as on named struct fields. For opaque collection fields without a
+  transparent wrapper, use a proxy newtype (e.g. `UserIdList`) rather than `Vec<opaque>` with a
+  field-level proxy.
+
 ## [0.19.0] - 2026-08-06
 
 A dependency-only release: `facet` moves from `=0.44` to `=0.46.5`. No generation

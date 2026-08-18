@@ -1,0 +1,29 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: "reflect!(Event, UserId, OptionalUserId).unwrap()"
+---
+? namespace: ROOT
+  name: Event
+: ENUM:
+    - 0:
+        MaybeUser:
+          - NEWTYPE:
+              TYPENAME:
+                namespace: ROOT
+                name: OptionalUserId
+          - []
+    - EXTERNAL
+    - []
+? namespace: ROOT
+  name: OptionalUserId
+: NEWTYPESTRUCT:
+    - OPTION:
+        TYPENAME:
+          namespace: ROOT
+          name: UserId
+    - - Proxy for optional opaque lattice IDs.
+? namespace: ROOT
+  name: UserId
+: NEWTYPESTRUCT:
+    - STR
+    - - "Domain ID with `Facet`. Wire anchor for typegen."

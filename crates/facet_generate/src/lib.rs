@@ -111,7 +111,12 @@
 //! | `#[facet(rename = "Name")]` | Override the generated name of a type, field, or variant |
 //! | `#[facet(rename_all = "camelCase")]` | Apply a naming convention across all fields or variants. Options are `PascalCase`, `camelCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE` |
 //! | `#[facet(skip)]` | Exclude a field or variant from the generated output |
-//! | `#[facet(opaque)]` | Do not descend into the field's type |
+//! | `#[facet(opaque)]` | Omit the field. The Rust type does not implement `Facet`. |
+//! | `#[facet(opaque, proxy = T)]` | Emit the proxy type `T`. Skip the Rust field type. Requires
+//!   bidirectional conversion between the field type and `T` (typically `TryFrom` both ways; `From`
+//!   is fine when conversion cannot fail). For optional opaque fields, use a proxy newtype such as
+//!   `OptionalUserId` wrapping `Option<UserId>` rather than `Option<opaque>` with a field-level
+//!   proxy. |
 //! | `#[facet(transparent)]` | Unwrap a newtype wrapper in the generated output |
 //!
 //! # Testing

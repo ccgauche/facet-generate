@@ -1,0 +1,28 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: "reflect!(WithTwo, UserId, OrgId).unwrap()"
+---
+? namespace: ROOT
+  name: OrgId
+: NEWTYPESTRUCT:
+    - STR
+    - - Second proxy type for multi-field tests.
+? namespace: ROOT
+  name: UserId
+: NEWTYPESTRUCT:
+    - STR
+    - - "Domain ID with `Facet`. Wire anchor for typegen."
+? namespace: ROOT
+  name: WithTwo
+: STRUCT:
+    - - user_id:
+          - TYPENAME:
+              namespace: ROOT
+              name: UserId
+          - []
+      - org_id:
+          - TYPENAME:
+              namespace: ROOT
+              name: OrgId
+          - []
+    - []

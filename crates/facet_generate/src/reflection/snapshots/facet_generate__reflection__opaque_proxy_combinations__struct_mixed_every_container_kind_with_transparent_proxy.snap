@@ -1,0 +1,72 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: "reflect!(KitchenSink, UserId).unwrap()"
+---
+? namespace: ROOT
+  name: KitchenSink
+: STRUCT:
+    - - plain:
+          - TYPENAME:
+              namespace: ROOT
+              name: UserId
+          - []
+      - optional:
+          - OPTION:
+              TYPENAME:
+                namespace: ROOT
+                name: UserId
+          - []
+      - boxed:
+          - TYPENAME:
+              namespace: ROOT
+              name: UserId
+          - []
+      - shared:
+          - TYPENAME:
+              namespace: ROOT
+              name: UserId
+          - []
+      - slice:
+          - TUPLEARRAY:
+              CONTENT:
+                TYPENAME:
+                  namespace: ROOT
+                  name: UserId
+              SIZE: 1
+          - []
+      - list:
+          - SEQ:
+              TYPENAME:
+                namespace: ROOT
+                name: UserId
+          - []
+      - maybe_list:
+          - SEQ:
+              OPTION:
+                TYPENAME:
+                  namespace: ROOT
+                  name: UserId
+          - []
+      - nested_map:
+          - MAP:
+              KEY: STR
+              VALUE:
+                OPTION:
+                  TYPENAME:
+                    namespace: ROOT
+                    name: UserId
+          - []
+      - map:
+          - MAP:
+              KEY: STR
+              VALUE:
+                TYPENAME:
+                  namespace: ROOT
+                  name: UserId
+          - []
+    - []
+? namespace: ROOT
+  name: UserId
+: NEWTYPESTRUCT:
+    - STR
+    - - "Domain ID with `Facet`. Wire anchor for typegen."

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use super::*;
 use crate::reflect;
+use opaque_proxy_fixtures::{UserId, WithoutFacet};
 
 #[test]
 fn unit_struct() {
@@ -1693,6 +1694,29 @@ fn struct_with_only_opaque() {
       name: WithFacet
     : UNITSTRUCT: []
     ");
+}
+
+#[test]
+fn struct_with_opaque_proxy_field() {
+    #[derive(Facet)]
+    struct WithFacet {
+        #[facet(opaque, proxy = UserId)]
+        user_id: WithoutFacet,
+    }
+
+    let registry = reflect!(WithFacet, UserId).unwrap();
+    assert!(
+        matches!(
+            registry
+                .iter()
+                .find(|(name, _)| name.name == "WithFacet")
+                .expect("WithFacet should be in the registry")
+                .1,
+            format::ContainerFormat::Struct(_, _)
+        ),
+        "opaque proxy field should produce a struct, not a unit struct"
+    );
+    insta::assert_yaml_snapshot!(registry);
 }
 
 #[test]

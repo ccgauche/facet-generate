@@ -1,0 +1,14 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: reflect!(Event).unwrap()
+---
+? namespace: ROOT
+  name: Event
+: ENUM:
+    - 0:
+        Hidden:
+          - TUPLE:
+              - STR
+          - []
+    - EXTERNAL
+    - []

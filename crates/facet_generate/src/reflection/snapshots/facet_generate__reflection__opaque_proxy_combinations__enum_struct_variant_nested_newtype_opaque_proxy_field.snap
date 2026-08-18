@@ -1,0 +1,30 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: "reflect!(Event, UserId).unwrap()"
+---
+? namespace: ROOT
+  name: Event
+: ENUM:
+    - 0:
+        SignIn:
+          - STRUCT:
+              - inner:
+                  - TYPENAME:
+                      namespace: ROOT
+                      name: Inner
+                  - []
+          - []
+    - EXTERNAL
+    - []
+? namespace: ROOT
+  name: Inner
+: NEWTYPESTRUCT:
+    - TYPENAME:
+        namespace: ROOT
+        name: UserId
+    - []
+? namespace: ROOT
+  name: UserId
+: NEWTYPESTRUCT:
+    - STR
+    - - "Domain ID with `Facet`. Wire anchor for typegen."

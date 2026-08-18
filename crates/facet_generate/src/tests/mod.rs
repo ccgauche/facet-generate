@@ -86,6 +86,7 @@ mod test_keypath_mutable_nested_type;
 mod test_keypath_mutable_optional;
 mod test_keypath_mutable_simple;
 mod test_only_attribute;
+mod test_opaque_proxy_field;
 mod test_optional_type_alias;
 mod test_preamble;
 mod test_serde_default_struct;

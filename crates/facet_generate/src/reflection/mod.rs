@@ -535,7 +535,6 @@ impl RegistryBuilder {
             StructKind::TupleStruct => {
                 if struct_type.fields.len() == 1 {
                     let field = struct_type.fields[0];
-                    let field_shape = field.shape();
 
                     // Check if this is a transparent struct
                     let is_transparent = is_transparent_shape(shape);
@@ -543,9 +542,7 @@ impl RegistryBuilder {
                     if is_transparent {
                         // For transparent structs, don't create a container - just process the inner type
                         // This will register the transparent struct with its inner type's format
-                        if !self.try_handle_bytes_attribute(&field) {
-                            self.format(field_shape)?;
-                        }
+                        self.handle_tuple_struct_field(&field)?;
                         self.pop_namespace();
                         return Ok(());
                     }
@@ -555,9 +552,7 @@ impl RegistryBuilder {
                     self.push_with_type_check(struct_name, container, shape)?;
 
                     // Process the inner field
-                    if !self.try_handle_bytes_attribute(&field) {
-                        self.format(field_shape)?;
-                    }
+                    self.handle_tuple_struct_field(&field)?;
                 } else {
                     // Handle tuple struct with multiple fields
                     let container = ContainerFormat::TupleStruct(vec![], shape.into());
@@ -567,9 +562,7 @@ impl RegistryBuilder {
                         if skip {
                             continue;
                         }
-                        if !self.try_handle_bytes_attribute(field) {
-                            self.format(field.shape())?;
-                        }
+                        self.handle_tuple_struct_field(field)?;
                     }
                 }
                 self.pop();
@@ -608,7 +601,7 @@ impl RegistryBuilder {
     }
 
     fn handle_struct_field(&mut self, field: &Field) -> Result<(), Error> {
-        let field_shape = field.shape();
+        let field_shape = reflection_shape_for_field(field);
 
         // Check for field-level attributes first
         if self.try_handle_bytes_attribute(field) {
@@ -629,14 +622,62 @@ impl RegistryBuilder {
         self.push_namespace(field_namespace.clone());
 
         // Now determine the proper format with the field-level context in place
-        let Some(field_format) = self.get_user_type_format(field_shape)? else {
-            // Skip this field if format is None (e.g. unknown opaque types)
+        let Some(field_format) = self.get_user_type_format_for_field(field)? else {
+            // Opaque field. No proxy.
             self.pop_namespace();
             return Ok(());
         };
 
-        // Process the type under the field-level namespace context
-        if let NamespaceAction::SetContext(ctx) = &field_namespace {
+        self.format_field_shape_under_namespace(field_shape, &field_namespace)?;
+        self.pop_namespace();
+
+        if let Some(ContainerFormat::Struct(named_formats, _doc)) = self.get_mut() {
+            let format = Named {
+                name: field_display_name(field),
+                doc: field.into(),
+                value: field_format,
+            };
+            named_formats.push(format);
+        }
+        Ok(())
+    }
+
+    /// Process a field in a tuple-struct or newtype-struct container.
+    ///
+    /// Tuple and newtype containers have no named fields — `format()` updates the parent
+    /// container via [`update_container_format`] while registering nested types.
+    /// `get_user_type_format_for_field` is only a gate to skip opaque fields without a proxy.
+    fn handle_tuple_struct_field(&mut self, field: &Field) -> Result<(), Error> {
+        if self.try_handle_bytes_attribute(field) {
+            return Ok(());
+        }
+
+        if self.try_handle_option_field(field)? {
+            return Ok(());
+        }
+
+        let field_shape = reflection_shape_for_field(field);
+        let field_namespace = extract_namespace_from_field_attributes(field)?;
+
+        self.push_namespace(field_namespace.clone());
+
+        if self.get_user_type_format_for_field(field)?.is_none() {
+            // Opaque field. No proxy.
+            self.pop_namespace();
+            return Ok(());
+        }
+
+        self.format_field_shape_under_namespace(field_shape, &field_namespace)?;
+        self.pop_namespace();
+        Ok(())
+    }
+
+    fn format_field_shape_under_namespace(
+        &mut self,
+        field_shape: &Shape,
+        field_namespace: &NamespaceAction,
+    ) -> Result<(), Error> {
+        if let NamespaceAction::SetContext(ctx) = field_namespace {
             if ctx.is_explicit() {
                 if let Namespace::Named(name) = &ctx.namespace {
                     self.format_with_namespace_override(field_shape, name)?;
@@ -648,17 +689,6 @@ impl RegistryBuilder {
             }
         } else {
             self.format(field_shape)?;
-        }
-
-        self.pop_namespace();
-
-        if let Some(ContainerFormat::Struct(named_formats, _doc)) = self.get_mut() {
-            let format = Named {
-                name: field_display_name(field),
-                doc: field.into(),
-                value: field_format,
-            };
-            named_formats.push(format);
         }
         Ok(())
     }
@@ -684,6 +714,10 @@ impl RegistryBuilder {
     }
 
     fn try_handle_option_field(&mut self, field: &Field) -> Result<bool, Error> {
+        if field_has_opaque_proxy(field) {
+            return Ok(false);
+        }
+
         let field_shape = field.shape();
         // Check if the field is an Option
         if field_shape.type_identifier == "Option"
@@ -691,8 +725,10 @@ impl RegistryBuilder {
         {
             // Handle Option types directly
             let inner_shape = option_def.t();
-            // Handle pointer types specially
-            let inner_format = get_format_for_shape(inner_shape)?;
+            let inner_format = match self.resolve_peeled_opaque_proxy_format(inner_shape)? {
+                Some(format) => format,
+                None => get_format_for_shape(inner_shape)?,
+            };
             let option_format = Format::Option(Box::new(inner_format));
 
             if let Some(ContainerFormat::Struct(named_formats, _doc)) = self.get_mut() {
@@ -701,11 +737,17 @@ impl RegistryBuilder {
                     doc: field.into(),
                     value: option_format,
                 });
+            } else if let Some(ContainerFormat::TupleStruct(formats, _doc)) = self.get_mut() {
+                formats.push(option_format);
+            } else if let Some(ContainerFormat::NewTypeStruct(format, _doc)) = self.get_mut() {
+                **format = option_format;
             }
 
             // If the inner type is a user-defined type, we need to process it too
             if !matches!(inner_shape.def, Def::Scalar) {
+                self.processing_nested = true;
                 self.format(inner_shape)?;
+                self.processing_nested = false;
             }
             return Ok(true);
         }
@@ -713,6 +755,10 @@ impl RegistryBuilder {
     }
 
     fn try_handle_tuple_struct_field(&mut self, field: &Field) -> Result<bool, Error> {
+        if field_has_opaque_proxy(field) {
+            return Ok(false);
+        }
+
         let field_shape = field.shape();
         // Check if the field is a tuple struct
         if let Type::User(UserType::Struct(inner_struct)) = &field_shape.ty {
@@ -725,17 +771,22 @@ impl RegistryBuilder {
                     tuple_formats.push(field_format);
                 }
 
+                let tuple_format = if tuple_formats.is_empty() {
+                    Format::Unit
+                } else {
+                    Format::Tuple(tuple_formats)
+                };
+
                 if let Some(ContainerFormat::Struct(named_formats, _doc)) = self.get_mut() {
-                    let tuple_format = if tuple_formats.is_empty() {
-                        Format::Unit
-                    } else {
-                        Format::Tuple(tuple_formats)
-                    };
                     named_formats.push(Named {
                         name: field_display_name(field),
                         doc: field.into(),
                         value: tuple_format,
                     });
+                } else if let Some(ContainerFormat::TupleStruct(formats, _doc)) = self.get_mut() {
+                    formats.push(tuple_format);
+                } else if let Some(ContainerFormat::NewTypeStruct(format, _doc)) = self.get_mut() {
+                    **format = tuple_format;
                 }
                 return Ok(true);
             }
@@ -751,17 +802,21 @@ impl RegistryBuilder {
                 let transparent_namespace = extract_namespace_from_shape(field_shape)?;
 
                 let inner_field = inner_struct.fields[0];
-                let inner_field_shape = inner_field.shape();
+                let inner_field_shape = reflection_shape_for_field(&inner_field);
 
-                // Check if the inner type is a user-defined type that needs namespace-aware naming
-                let inner_format = if let Type::User(UserType::Struct(_) | UserType::Enum(_)) =
-                    &inner_field_shape.ty
-                {
-                    let namespaced_name = self.get_name_with_mappings(inner_field_shape)?;
-                    Format::TypeName(namespaced_name)
-                } else {
-                    get_inner_format(inner_field_shape)?
+                // Resolve the field format before applying the transparent wrapper's namespace.
+                let Some(inner_format) = self.resolve_transparent_field_format(field_shape)? else {
+                    // Opaque inner without proxy — omit the field (same as struct fields).
+                    return Ok(true);
                 };
+
+                if matches!(inner_format, Format::TypeName(_)) {
+                    self.push_namespace(transparent_namespace);
+                    self.processing_nested = true;
+                    self.format(inner_field_shape)?;
+                    self.processing_nested = false;
+                    self.pop_namespace();
+                }
 
                 if let Some(ContainerFormat::Struct(named_formats, _doc)) = self.get_mut() {
                     named_formats.push(Named {
@@ -769,18 +824,128 @@ impl RegistryBuilder {
                         doc: field.into(),
                         value: inner_format,
                     });
+                } else if let Some(ContainerFormat::TupleStruct(formats, _doc)) = self.get_mut() {
+                    formats.push(inner_format);
+                } else if let Some(ContainerFormat::NewTypeStruct(format, _doc)) = self.get_mut() {
+                    **format = inner_format;
                 }
-
-                // Process the inner type with the namespace context of the transparent struct
-                self.push_namespace(transparent_namespace);
-                self.format(inner_field_shape)?;
-                self.pop_namespace();
 
                 return Ok(true);
             }
         }
 
         Ok(false)
+    }
+
+    /// Peel container layers (`Option`, `Box`, `Vec`, maps, …) and transparent wrappers to reach
+    /// an opaque+proxy inner type. Returns `None` when no opaque+proxy peel applies.
+    ///
+    /// Reference types (`&T`) peel to the inner format without retaining a reference wrapper —
+    /// generated clients see the pointee type (e.g. `OPTION<UserId>` for `&Option<Wrapper>`).
+    fn resolve_peeled_opaque_proxy_format(
+        &mut self,
+        shape: &Shape,
+    ) -> Result<Option<Format>, Error> {
+        if let Type::Pointer(PointerType::Reference(pt) | PointerType::Raw(pt)) = &shape.ty {
+            if let Some(format) = self.resolve_peeled_opaque_proxy_format(pt.target)? {
+                return Ok(Some(format));
+            }
+            return Ok(None);
+        }
+        if let Def::Option(option_def) = shape.def {
+            if let Some(inner_format) = self.resolve_peeled_opaque_proxy_format(option_def.t())? {
+                return Ok(Some(Format::Option(Box::new(inner_format))));
+            }
+            return Ok(None);
+        }
+        if let Def::Pointer(pointer_def) = shape.def {
+            if let Some(pointee) = pointer_def.pointee
+                && let Some(format) = self.resolve_peeled_opaque_proxy_format(pointee)?
+            {
+                return Ok(Some(format));
+            }
+            return Ok(None);
+        }
+        if let Def::List(list_def) = shape.def {
+            if let Some(inner_format) = self.resolve_peeled_opaque_proxy_format(list_def.t())? {
+                return Ok(Some(Format::Seq(Box::new(inner_format))));
+            }
+            return Ok(None);
+        }
+        if let Def::Slice(slice_def) = shape.def {
+            if let Some(inner_format) = self.resolve_peeled_opaque_proxy_format(slice_def.t())? {
+                return Ok(Some(Format::Seq(Box::new(inner_format))));
+            }
+            return Ok(None);
+        }
+        if let Def::Set(set_def) = shape.def {
+            if let Some(inner_format) = self.resolve_peeled_opaque_proxy_format(set_def.t())? {
+                return Ok(Some(Format::Set(Box::new(inner_format))));
+            }
+            return Ok(None);
+        }
+        if let Def::Map(map_def) = shape.def {
+            let key_peeled = self.resolve_peeled_opaque_proxy_format(map_def.k())?;
+            let value_peeled = self.resolve_peeled_opaque_proxy_format(map_def.v())?;
+            if key_peeled.is_none() && value_peeled.is_none() {
+                return Ok(None);
+            }
+            let key_format = match key_peeled {
+                Some(format) => format,
+                None => match self.get_user_type_format(map_def.k())? {
+                    Some(format) => format,
+                    None => return Ok(None),
+                },
+            };
+            let value_format = match value_peeled {
+                Some(format) => format,
+                None => match self.get_user_type_format(map_def.v())? {
+                    Some(format) => format,
+                    None => return Ok(None),
+                },
+            };
+            return Ok(Some(Format::Map {
+                key: Box::new(key_format),
+                value: Box::new(value_format),
+            }));
+        }
+        if let Def::Array(array_def) = shape.def {
+            if let Some(content) = self.resolve_peeled_opaque_proxy_format(array_def.t())? {
+                return Ok(Some(Format::TupleArray {
+                    content: Box::new(content),
+                    size: array_def.n,
+                }));
+            }
+            return Ok(None);
+        }
+        if is_transparent_shape(shape) {
+            return self.resolve_transparent_field_format(shape);
+        }
+        Ok(None)
+    }
+
+    /// Format for a transparent struct reference, peeling layers and opaque proxies.
+    fn resolve_transparent_field_format(
+        &mut self,
+        mut shape: &Shape,
+    ) -> Result<Option<Format>, Error> {
+        while is_transparent_shape(shape) {
+            if let Type::User(UserType::Struct(inner_struct)) = &shape.ty
+                && inner_struct.kind == StructKind::TupleStruct
+                && inner_struct.fields.len() == 1
+            {
+                let inner_field = inner_struct.fields[0];
+                if let Some(format) = self.get_user_type_format_for_field(&inner_field)? {
+                    return Ok(Some(format));
+                }
+                shape = inner_field.shape();
+            } else if let Some(inner) = shape.inner {
+                shape = inner;
+            } else {
+                break;
+            }
+        }
+        self.get_user_type_format(shape)
     }
 
     fn format_enum(&mut self, enum_type: &EnumType, shape: &Shape) -> Result<(), Error> {
@@ -883,18 +1048,39 @@ impl RegistryBuilder {
         if let Some(value) = bytes_attribute_format(&field) {
             return Ok(VariantFormat::NewType(Box::new(value)));
         }
-        let field_shape = field.shape();
+        let field_shape = reflection_shape_for_field(&field);
         if is_transparent_shape(field_shape)
-            && let Some(inner) = field_shape.inner
-            && let Some(format) = self.get_user_type_format(inner)?
+            && let Type::User(UserType::Struct(inner_struct)) = &field_shape.ty
+            && inner_struct.kind == StructKind::TupleStruct
+            && inner_struct.fields.len() == 1
+        {
+            let inner_field = inner_struct.fields[0];
+            let inner_field_shape = reflection_shape_for_field(&inner_field);
+            if let Some(format) = self.resolve_transparent_field_format(field_shape)? {
+                if !matches!(inner_field_shape.def, Def::Scalar) {
+                    self.format(inner_field_shape)?;
+                }
+                return Ok(VariantFormat::NewType(Box::new(format)));
+            }
+            return Ok(VariantFormat::Unit);
+        }
+        if is_transparent_shape(field_shape)
+            && field_shape.inner.is_some()
+            && let Some(format) = self.get_user_type_format_for_field(&field)?
         {
             return Ok(VariantFormat::NewType(Box::new(format)));
         }
-        if let Def::Option(v) = field_shape.def
-            && let Some(format) = self.get_user_type_format(v.t)?
-        {
+        if let Def::Option(v) = field_shape.def {
+            let inner_shape = v.t();
+            let inner_format = match self.resolve_peeled_opaque_proxy_format(inner_shape)? {
+                Some(format) => format,
+                None => match self.get_user_type_format(inner_shape)? {
+                    Some(format) => format,
+                    None => return Ok(VariantFormat::Unit),
+                },
+            };
             return Ok(VariantFormat::NewType(Box::new(Format::Option(Box::new(
-                format,
+                inner_format,
             )))));
         }
 
@@ -957,9 +1143,9 @@ impl RegistryBuilder {
 
         self.push_namespace(field_namespace);
 
-        // Check if this field should be skipped (opaque types)
-        let Some(format) = self.get_user_type_format(field_shape)? else {
-            // If the field should be skipped, make this a unit variant
+        // Skip opaque fields without a proxy.
+        let Some(format) = self.get_user_type_format_for_field(&field)? else {
+            // No proxy. Unit variant.
             self.pop_namespace();
             return Ok(VariantFormat::Unit);
         };
@@ -1013,7 +1199,7 @@ impl RegistryBuilder {
                 continue;
             }
 
-            let field_shape = field.shape();
+            let field_shape = reflection_shape_for_field(field);
 
             // Check for field-level attributes first
             if let Some(value) = bytes_attribute_format(field) {
@@ -1027,40 +1213,21 @@ impl RegistryBuilder {
                 continue;
             }
 
+            if self.try_handle_option_field(field)? {
+                continue;
+            }
+
+            if self.try_handle_tuple_struct_field(field)? {
+                continue;
+            }
+
             // Check for field-level namespace annotation
             let field_namespace = extract_namespace_from_field_attributes(field)?;
 
             self.push_namespace(field_namespace.clone());
 
-            // Handle Option types specially (like handle_struct_field does)
-            if field_shape.type_identifier == "Option"
-                && let Def::Option(option_def) = field_shape.def
-            {
-                let inner_shape = option_def.t();
-                let inner_format =
-                    get_inner_format_with_context(inner_shape, self.current_namespace())?;
-                let option_format = Format::Option(Box::new(inner_format));
-
-                // Process any user-defined types in the nested structure
-                if !matches!(inner_shape.def, Def::Scalar) {
-                    self.format(inner_shape)?;
-                }
-
-                self.pop_namespace();
-
-                if let Some(ContainerFormat::Struct(named_formats, _doc)) = self.get_mut() {
-                    named_formats.push(Named {
-                        name: field_display_name(field),
-                        doc: field.into(),
-                        value: option_format,
-                    });
-                }
-                continue;
-            }
-
-            // Determine the proper format with the field-level context in place
-            let Some(value) = self.get_user_type_format(field_shape)? else {
-                // Skip this field if format couldn't be determined
+            let Some(value) = self.get_user_type_format_for_field(field)? else {
+                // Opaque field. No proxy.
                 self.pop_namespace();
                 continue;
             };
@@ -1137,21 +1304,60 @@ impl RegistryBuilder {
                 }
                 continue;
             }
-            // Use the namespace context of the current enum for its variant fields
-            let transparent_namespace = extract_namespace_from_shape(shape)?;
 
-            self.push_namespace(transparent_namespace);
-            self.format(field.shape())?;
+            if self.try_handle_option_field(field)? {
+                continue;
+            }
+
+            if self.try_handle_tuple_struct_field(field)? {
+                continue;
+            }
+
+            let field_namespace = extract_namespace_from_field_attributes(field)?;
+
+            match &field_namespace {
+                NamespaceAction::Inherit => {
+                    let enum_namespace = extract_namespace_from_shape(shape)?;
+                    self.push_namespace(enum_namespace);
+                }
+                other => self.push_namespace(other.clone()),
+            }
+
+            // Skip opaque fields without a proxy (same as struct variants).
+            let Some(_) = self.get_user_type_format_for_field(field)? else {
+                self.pop_namespace();
+                continue;
+            };
+
+            let field_shape = reflection_shape_for_field(field);
+
+            if let NamespaceAction::SetContext(ctx) = &field_namespace {
+                if ctx.is_explicit() {
+                    if let Namespace::Named(name) = &ctx.namespace {
+                        self.format_with_namespace_override(field_shape, name)?;
+                    } else {
+                        self.format(field_shape)?;
+                    }
+                } else {
+                    self.format(field_shape)?;
+                }
+            } else {
+                self.format(field_shape)?;
+            }
+
             self.pop_namespace();
         }
 
         // Extract the formats from the temporary container
-        let variant_format =
-            if let Some(ContainerFormat::TupleStruct(formats, _doc)) = self.registry.get(&temp) {
-                VariantFormat::Tuple(formats.clone())
-            } else {
+        let variant_format = match self.registry.get(&temp) {
+            Some(ContainerFormat::TupleStruct(formats, _doc)) if formats.is_empty() => {
                 VariantFormat::Unit
-            };
+            }
+            Some(ContainerFormat::TupleStruct(formats, _doc)) => {
+                VariantFormat::Tuple(formats.clone())
+            }
+            _ => VariantFormat::Unit,
+        };
 
         // Clean up the temporary container
         let _removed = self.registry.remove(&temp);
@@ -1245,7 +1451,8 @@ impl RegistryBuilder {
     }
 
     fn format_option(&mut self, option_def: OptionDef) -> Result<(), Error> {
-        // Get the inner type of the Option
+        // Opaque optional fields use a proxy newtype (e.g. `OptionalUserId`), not
+        // `Option<opaque>` with field-level proxy — see `opaque_proxy_fixtures`.
         let inner_shape = option_def.t();
 
         // We need to determine what format to use for the Option based on the inner type
@@ -1281,7 +1488,7 @@ impl RegistryBuilder {
     }
 
     fn handle_opaque_pointee(&mut self) {
-        // For pointers that point to opaque types, treat as unit type for now
+        // Opaque pointer pointees without a proxy are not yet reflected — treat as unit.
         let format = Format::Unit;
         self.update_container_format(format, UpdateMode::Force);
     }
@@ -1323,8 +1530,26 @@ impl RegistryBuilder {
         self.current_namespace_context().map(|ctx| &ctx.namespace)
     }
 
-    /// Helper method to determine format for user-defined types with namespace context
+    /// Field format. Uses the opaque proxy when set.
+    ///
+    /// Opaque fields are shaped as `OpaqueBorrow<'_, T>` at runtime, so container layers on the
+    /// Rust field type (`Option<T>`, `Vec<T>`, …) are not visible here. For optional or collection
+    /// opaque fields, use a proxy newtype (`OptionalUserId`, `UserIdList`, …) rather than a
+    /// scalar proxy on a container field type.
+    fn get_user_type_format_for_field(&mut self, field: &Field) -> Result<Option<Format>, Error> {
+        self.get_user_type_format(reflection_shape_for_field(field))
+    }
+
+    /// Helper method to determine format for user-defined types with namespace context.
+    ///
+    /// `resolve_peeled_opaque_proxy_format` may call back into this via
+    /// `resolve_transparent_field_format` → `get_user_type_format_for_field`; that path always
+    /// substitutes the field's proxy shape (`UserId`, …) before re-entering, so recursion
+    /// terminates.
     fn get_user_type_format(&mut self, mut field_shape: &Shape) -> Result<Option<Format>, Error> {
+        if let Some(format) = self.resolve_peeled_opaque_proxy_format(field_shape)? {
+            return Ok(Some(format));
+        }
         if is_transparent_shape(field_shape)
             && let Some(inner) = field_shape.inner
         {
@@ -1335,10 +1560,11 @@ impl RegistryBuilder {
                 if field_shape.type_identifier == "()" {
                     Ok(Some(Format::Unit))
                 } else if let Def::Option(v) = field_shape.def {
-                    let renamed_name = self.get_name_with_mappings(v.t)?;
-                    Ok(Some(Format::Option(Box::new(Format::TypeName(
-                        renamed_name,
-                    )))))
+                    let inner_format = match self.resolve_peeled_opaque_proxy_format(v.t())? {
+                        Some(format) => format,
+                        None => Format::TypeName(self.get_name_with_mappings(v.t())?),
+                    };
+                    Ok(Some(Format::Option(Box::new(inner_format))))
                 } else {
                     let renamed_name = self.get_name_with_mappings(field_shape)?;
                     Ok(Some(Format::TypeName(renamed_name)))
@@ -1704,6 +1930,16 @@ fn extract_namespace_from_field_attributes(field: &Field) -> Result<NamespaceAct
     Ok(NamespaceAction::Inherit)
 }
 
+/// True when the field uses `#[facet(opaque, proxy = T)]`.
+fn field_has_opaque_proxy(field: &Field) -> bool {
+    field.proxy_shape().is_some()
+}
+
+/// Proxy shape for codegen. Used when `#[facet(opaque, proxy = T)]` is set.
+fn reflection_shape_for_field(field: &Field) -> &Shape {
+    field.proxy_shape().unwrap_or_else(|| field.shape())
+}
+
 /// Returns the display name for a field, respecting `#[facet(rename = "...")]`.
 ///
 /// If the field has a `rename` value, that is used; otherwise falls back to `field.name`.
@@ -2002,6 +2238,18 @@ fn get_inner_format_with_context(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "opaque_proxy_fixtures.rs"]
+pub(crate) mod opaque_proxy_fixtures;
+
+#[cfg(test)]
+#[path = "opaque_proxy_combinations.rs"]
+mod opaque_proxy_combinations;
+
+#[cfg(test)]
+#[path = "proxy_tests.rs"]
+mod proxy_tests;
 
 #[cfg(test)]
 #[path = "namespace_tests.rs"]

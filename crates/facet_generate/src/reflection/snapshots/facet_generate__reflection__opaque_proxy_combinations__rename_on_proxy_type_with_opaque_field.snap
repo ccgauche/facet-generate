@@ -1,0 +1,18 @@
+---
+source: crates/facet_generate/src/reflection/opaque_proxy_combinations.rs
+expression: "reflect!(Holder, RenamedUserId).unwrap()"
+---
+? namespace: ROOT
+  name: Holder
+: STRUCT:
+    - - user_id:
+          - TYPENAME:
+              namespace: ROOT
+              name: WireUserId
+          - []
+    - []
+? namespace: ROOT
+  name: WireUserId
+: NEWTYPESTRUCT:
+    - STR
+    - []
