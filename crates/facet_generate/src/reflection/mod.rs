@@ -608,16 +608,22 @@ impl RegistryBuilder {
             return Ok(());
         }
 
-        if self.try_handle_option_field(field)? {
-            return Ok(());
-        }
-
-        if self.try_handle_tuple_struct_field(field)? {
-            return Ok(());
-        }
-
-        // Check for field-level namespace annotation
         let field_namespace = extract_namespace_from_field_attributes(field)?;
+
+        if field_namespace.is_explicit() {
+            self.push_namespace(field_namespace.clone());
+            let namespace = self.current_namespace().cloned();
+            let handled = self.try_handle_option_field(field, namespace.clone())?
+                || self.try_handle_tuple_struct_field(field, namespace)?;
+            self.pop_namespace();
+            if handled {
+                return Ok(());
+            }
+        } else if self.try_handle_option_field(field, None)?
+            || self.try_handle_tuple_struct_field(field, None)?
+        {
+            return Ok(());
+        }
 
         self.push_namespace(field_namespace.clone());
 
@@ -652,13 +658,21 @@ impl RegistryBuilder {
             return Ok(());
         }
 
-        if self.try_handle_option_field(field)? {
+        let field_namespace = extract_namespace_from_field_attributes(field)?;
+
+        if field_namespace.is_explicit() {
+            self.push_namespace(field_namespace.clone());
+            let namespace = self.current_namespace().cloned();
+            let handled = self.try_handle_option_field(field, namespace)?;
+            self.pop_namespace();
+            if handled {
+                return Ok(());
+            }
+        } else if self.try_handle_option_field(field, None)? {
             return Ok(());
         }
 
         let field_shape = reflection_shape_for_field(field);
-        let field_namespace = extract_namespace_from_field_attributes(field)?;
-
         self.push_namespace(field_namespace.clone());
 
         if self.get_user_type_format_for_field(field)?.is_none() {
@@ -713,7 +727,11 @@ impl RegistryBuilder {
         true
     }
 
-    fn try_handle_option_field(&mut self, field: &Field) -> Result<bool, Error> {
+    fn try_handle_option_field(
+        &mut self,
+        field: &Field,
+        namespace_context: Option<Namespace>,
+    ) -> Result<bool, Error> {
         if field_has_opaque_proxy(field) {
             return Ok(false);
         }
@@ -727,7 +745,7 @@ impl RegistryBuilder {
             let inner_shape = option_def.t();
             let inner_format = match self.resolve_peeled_opaque_proxy_format(inner_shape)? {
                 Some(format) => format,
-                None => get_format_for_shape(inner_shape)?,
+                None => get_inner_format_with_context(inner_shape, namespace_context.as_ref())?,
             };
             let option_format = Format::Option(Box::new(inner_format));
 
@@ -754,7 +772,11 @@ impl RegistryBuilder {
         Ok(false)
     }
 
-    fn try_handle_tuple_struct_field(&mut self, field: &Field) -> Result<bool, Error> {
+    fn try_handle_tuple_struct_field(
+        &mut self,
+        field: &Field,
+        namespace_context: Option<Namespace>,
+    ) -> Result<bool, Error> {
         if field_has_opaque_proxy(field) {
             return Ok(false);
         }
@@ -767,7 +789,10 @@ impl RegistryBuilder {
                 let mut tuple_formats = vec![];
                 for tuple_field in inner_struct.fields {
                     let tuple_field_shape = tuple_field.shape();
-                    let field_format = get_inner_format(tuple_field_shape)?;
+                    let field_format = get_inner_format_with_context(
+                        tuple_field_shape,
+                        namespace_context.as_ref(),
+                    )?;
                     tuple_formats.push(field_format);
                 }
 
@@ -1213,18 +1238,19 @@ impl RegistryBuilder {
                 continue;
             }
 
-            if self.try_handle_option_field(field)? {
-                continue;
-            }
-
-            if self.try_handle_tuple_struct_field(field)? {
-                continue;
-            }
-
-            // Check for field-level namespace annotation
             let field_namespace = extract_namespace_from_field_attributes(field)?;
-
             self.push_namespace(field_namespace.clone());
+            let namespace = self.current_namespace().cloned();
+
+            if self.try_handle_option_field(field, namespace.clone())? {
+                self.pop_namespace();
+                continue;
+            }
+
+            if self.try_handle_tuple_struct_field(field, namespace)? {
+                self.pop_namespace();
+                continue;
+            }
 
             let Some(value) = self.get_user_type_format_for_field(field)? else {
                 // Opaque field. No proxy.
@@ -1305,22 +1331,24 @@ impl RegistryBuilder {
                 continue;
             }
 
-            if self.try_handle_option_field(field)? {
-                continue;
-            }
-
-            if self.try_handle_tuple_struct_field(field)? {
-                continue;
-            }
-
             let field_namespace = extract_namespace_from_field_attributes(field)?;
-
             match &field_namespace {
                 NamespaceAction::Inherit => {
                     let enum_namespace = extract_namespace_from_shape(shape)?;
                     self.push_namespace(enum_namespace);
                 }
                 other => self.push_namespace(other.clone()),
+            }
+            let namespace = self.current_namespace().cloned();
+
+            if self.try_handle_option_field(field, namespace.clone())? {
+                self.pop_namespace();
+                continue;
+            }
+
+            if self.try_handle_tuple_struct_field(field, namespace)? {
+                self.pop_namespace();
+                continue;
             }
 
             // Skip opaque fields without a proxy (same as struct variants).

@@ -1013,6 +1013,79 @@ fn enum_struct_variant_field_namespace_with_opaque_proxy() {
     insta::assert_yaml_snapshot!(reflect!(Event, UserId).unwrap());
 }
 
+// Special field handlers must preserve the namespace context of their caller.
+
+#[test]
+fn struct_option_transparent_proxy_respects_field_namespace() {
+    use crate as fg;
+
+    #[derive(Facet)]
+    #[facet(transparent)]
+    struct Wrapper(#[facet(opaque, proxy = UserId)] WithoutFacet);
+
+    #[derive(Facet)]
+    struct Holder {
+        #[facet(fg::namespace = "wire")]
+        user_id: Option<Wrapper>,
+    }
+
+    insta::assert_yaml_snapshot!(reflect!(Holder, UserId).unwrap());
+}
+
+#[test]
+fn tuple_struct_option_transparent_proxy_respects_field_namespace() {
+    use crate as fg;
+
+    #[derive(Facet)]
+    #[facet(transparent)]
+    struct Wrapper(#[facet(opaque, proxy = UserId)] WithoutFacet);
+
+    #[derive(Facet)]
+    struct Holder(#[facet(fg::namespace = "wire")] Option<Wrapper>);
+
+    insta::assert_yaml_snapshot!(reflect!(Holder, UserId).unwrap());
+}
+
+#[test]
+fn enum_struct_option_transparent_proxy_respects_field_namespace() {
+    use crate as fg;
+
+    #[derive(Facet)]
+    #[facet(transparent)]
+    struct Wrapper(#[facet(opaque, proxy = UserId)] WithoutFacet);
+
+    #[derive(Facet)]
+    #[repr(C)]
+    #[allow(dead_code)]
+    enum Event {
+        SignIn {
+            #[facet(fg::namespace = "wire")]
+            user_id: Option<Wrapper>,
+        },
+    }
+
+    insta::assert_yaml_snapshot!(reflect!(Event, UserId).unwrap());
+}
+
+#[test]
+fn enum_tuple_option_transparent_proxy_inherits_enum_namespace() {
+    use crate as fg;
+
+    #[derive(Facet)]
+    #[facet(transparent)]
+    struct Wrapper(#[facet(opaque, proxy = UserId)] WithoutFacet);
+
+    #[derive(Facet)]
+    #[facet(fg::namespace = "wire")]
+    #[repr(C)]
+    #[allow(dead_code)]
+    enum Event {
+        SignIn(Option<Wrapper>),
+    }
+
+    insta::assert_yaml_snapshot!(reflect!(Event, UserId).unwrap());
+}
+
 // --- Transparent bytes wrapper alongside opaque proxy (reflection only) ---
 
 #[test]
